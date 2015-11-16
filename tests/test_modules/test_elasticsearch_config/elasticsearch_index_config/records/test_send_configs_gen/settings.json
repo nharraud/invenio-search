@@ -1,0 +1,10 @@
+{
+    "analysis" : {
+        "analyzer":{
+            "content-gen":{
+                "type":"custom",
+                "tokenizer":"whitespace"
+            }
+        }
+    }
+}

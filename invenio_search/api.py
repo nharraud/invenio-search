@@ -93,7 +93,9 @@ class Results(object):
     def recids(self):
         # FIXME add warnings
         from intbitset import intbitset
-        from invenio.ext.es import es
+        from .es import get_es_client
+        from flask import current_app
+        es = get_es_client(current_app)
         results = es.search(
             index='records',
             doc_type='record',
@@ -106,8 +108,9 @@ class Results(object):
         return intbitset([int(r['_id']) for r in results['hits']['hits']])
 
     def _search(self):
-        from invenio.ext.es import es
-
+        from .es import get_es_client
+        from flask import current_app
+        es = get_es_client(current_app)
         if self._results is None:
             self._results = es.search(
                 index='records',

@@ -1,0 +1,9 @@
+{
+    "id": "http://some.site/root_schema#",
+    "type": "object",
+    "properties": {
+        "int_attr": { "type": "integer" },
+        "number_attr": { "type": "number" },
+        "removed_attr": { "type": "number" }
+    }
+}

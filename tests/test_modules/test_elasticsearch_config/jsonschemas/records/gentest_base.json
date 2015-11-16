@@ -1,0 +1,7 @@
+{
+    "id": "http://some.site/root_schema#",
+    "type": "object",
+    "properties": {
+        "attr1": {"type": "string"}
+    }
+}

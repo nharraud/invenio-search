@@ -1,0 +1,10 @@
+{
+    "_all": true,
+    "numeric_detection": false,
+    "date_detection": false,
+    "properties": {
+        "other_attribute": {
+            "type": "string"
+        }
+    }
+}

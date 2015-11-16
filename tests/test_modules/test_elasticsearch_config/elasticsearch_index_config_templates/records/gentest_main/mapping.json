@@ -1,0 +1,8 @@
+{% extends "records/gentest_main/_mapping.json" %}
+
+{% block gentest_main__PROPERTIES__ %}
+    {{ super() }},
+    "additional_attr": { "type": "string" },
+    "removed_attr": null
+
+{% endblock %}

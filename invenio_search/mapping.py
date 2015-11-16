@@ -17,107 +17,183 @@
 # along with Invenio; if not, write to the Free Software Foundation, Inc.,
 # 59 Temple Place, Suite 330, Boston, MA 02111-1307, USA.
 
-"""Elastic Search integration. mapping funtion"""
+"""Elastic Search mapping generation and sending."""
+
+import codecs
+
+from flask import current_app
+
+from flask_registry import PackageRegistry
+
+import jinja2
 
 import json
 
+from jsonschema_to_elasticmapping import mapping, templating
+
 import os
 
-from jinja2 import Environment, PackageLoader
+import shutil
 
-from invenio.base.globals import cfg
+import re
 
-
-def loadFieldsFromJson(path):
-    """extract raw fields from multiples json file"""
-    rawfields = {}
-
-    for schemaFile in os.listdir("schemas"):
-        jsonSchema = json.loads(open(path + "/" + schemaFile).read())
-
-        try:
-            if not isinstance(jsonSchema, dict):
-                raise Exception('not a valid schema, not a dictonnary')
-
-            if not jsonSchema.has_key("properties"):
-                raise Exception('not a valid schema')
-
-            if not isinstance(jsonSchema['properties'], dict):
-                raise Exception('not a valid schema')
-
-            for key, value in jsonSchema['properties'].iteritems():
-                rawfields[key] = value
-
-        except Exception:
-            print path + "/" + schemaFile + " is not a valid schema"
-
-    return rawfields
+from .helpers import mkdir_p, split_all
 
 
-def format_fields(rawFields):
-    """format fields for es mapping"""
-    fields = {}
-    for key, value in rawFields.iteritems():
-        currentfield = {}
+def create_mapping(gen_templates_directory, gen_mappings_directory,
+                   schemas, schemas_urls, json_base_schema,
+                   modules_templates, template_gen_config):
+    """Generate elasticsearch mappings and mapping templates.
+    Used also for testing."""
 
-        #if there is subfleid
-        if isinstance(value, dict) and value.has_key("items"):
-            currentfield["type"] = "object"
-            currentfield["properties"] = {}
-            for key2, value in value["items"]["properties"].iteritems():
-                currentfield["properties"][key2] = {"type":"string"}
+    # remove all previously generated files
+    if os.path.exists(gen_templates_directory):
+        shutil.rmtree(gen_templates_directory)
+    if os.path.exists(gen_mappings_directory):
+        shutil.rmtree(gen_mappings_directory)
+    # recreate the directories where the generated files will be written
+    mkdir_p(os.path.join(gen_templates_directory))
+    mkdir_p(os.path.join(gen_mappings_directory))
+
+    # generate the templates
+    templates = generate_mappings_templates(schemas, schemas_urls,
+                                            json_base_schema,
+                                            template_gen_config)
+
+    # write the templates
+    for rel_path, template in templates.iteritems():
+        abs_path = os.path.join(gen_templates_directory, rel_path)
+        mkdir_p(os.path.split(abs_path)[0])
+        with codecs.open(abs_path, 'w', 'utf-8') \
+            as es_template_file:
+            es_template_file.write(template)
+
+    # merge the modules_templates dict and the generated templates dict
+    templates.update(modules_templates)
+
+    # Create jinja environment. It will search for all templates in modules and
+    # in the directory where generated templates have been put.
+    jinja_loaders = [jinja2.PackageLoader(p, 'elasticsearch_index_config_templates')
+                     for p in PackageRegistry(app=current_app)]
+    jinja_loaders.append(jinja2.FileSystemLoader(gen_templates_directory))
+    jinja_env = jinja2.Environment(loader = jinja2.ChoiceLoader(jinja_loaders))
+
+    # Generate the final mapping from the import jinja templates
+    for template in templates:
+        root, file = os.path.split(template)
+        if file != 'mapping.json':
+            continue
+        print('GENERATING elasticsearch mapping {}'.format(template))
+        # Generate the mapping from the import jinja template
+        es_mapping_str = jinja_env.get_template(template).render()
+        # Remove all "null" values and format the mapping.
+        # This enables extending a block and removing some of its fields by
+        # just setting them as null.
+        es_mapping = json \
+            .dumps(mapping.clean_mapping(json.loads(es_mapping_str)), indent=4)
+        # create the directory where the mapping will be written
+        es_mapping_dir = os.path.join(gen_mappings_directory, root)
+        mkdir_p(es_mapping_dir)
+        es_mapping_path = os.path.join(es_mapping_dir, 'mapping.json')
+        with codecs.open(es_mapping_path, 'w', 'utf-8') as es_mapping_file:
+            es_mapping_file.write(es_mapping)
+
+
+def generate_mappings_templates(schemas, schemas_urls, json_base_schema,
+                                config):
+    """Generate elasticsearch mapping templates from jsonschemas."""
+    context_schemas = {}
+    for schema_name, url in schemas_urls.iteritems():
+        context_schemas[url] = schemas[schema_name]
+
+    templates = {}
+    # generate the jinja templates from jsonschemas
+    for schema_path, url in schemas_urls.iteritems():
+        # url = schemas_api.internal_schema_url(schema_path)
+        #TODO: handle 'non record' schemas
+        if (json_base_schema != schema_path and
+                schema_path.startswith('records' + os.path.sep)):
+            schema_dir, schema_file = os.path.split(schema_path)
+
+            es_template_mapping = mapping \
+                .generate_type_mapping(schemas[schema_path], url,
+                                       context_schemas, config)
+            schema_name = schema_file[:-len('.json')]
+
+            # name of the type used in the jinja template. Remove characters
+            type_name = re.sub('[^a-zA-Z0-9_]', '_', schema_name)
+            es_template = templating.es_type_to_jinja(es_template_mapping,
+                                                      type_name)
+
+            # paths used by the jinja generator
+            es_abs_template_relative_path = os.path.join(schema_dir, schema_name,
+                                                         '_mapping.json')
+            es_template_relative_path = os.path.join(schema_dir, schema_name,
+                                                     'mapping.json')
+
+            print('GENERATING elasticsearch mapping TEMPLATE {}' \
+                  .format(es_template_relative_path))
+
+            templates[es_abs_template_relative_path] = es_template
+            templates[es_template_relative_path] = u'{{% extends "{}" %}}' \
+                .format(es_abs_template_relative_path)
+
+    return templates
+
+
+def send_mappings(gen_mappings_directory, modules_configs, es_client):
+    """Send modules' and generated mappings to elasticsearch.
+    Used also for testing."""
+    # add the generated mapping files
+    for root, dirs, files in os.walk(gen_mappings_directory):
+        for f in files:
+            relative_path = os.path \
+                .join(root[len(gen_mappings_directory) + len(os.path.sep):], f)
+            absolute_path = os.path.join(root, f)
+            if relative_path not in modules_configs:
+                modules_configs[relative_path] = absolute_path
+
+    # for each mapping, create or update the index. Send also the corresponding
+    # settings
+    for rel_path, abs_path in modules_configs.iteritems():
+        rel_dir, file_name = os.path.split(rel_path)
+        abs_dir = os.path.split(abs_path)[0]
+        if file_name != 'mapping.json':
+            continue
+        doc_type = split_all(rel_path)[0]
+        settings_path = os.path.join(abs_dir, 'settings.json')
+
+        # Transform the path so that it can be used as an index name
+        # Index names cannot contain all characters.
+        index_name = re.sub('[^a-zA-Z0-9_.-]', '_', rel_dir).lower()
+        index_mapping = None
+        index_settings = None
+        with codecs.open(abs_path, 'r', 'utf-8') as index_mapping_file:
+            index_mapping = json.loads(index_mapping_file.read())
+        if os.path.isfile(settings_path):
+            with codecs.open(settings_path, 'r', 'utf-8') as settings_file:
+                index_settings = json.loads(settings_file.read())
+
+        # if the index exists then update its configuration else create it
+        if es_client.exists(index=index_name):
+            print('UPDATING index {index} with mapping {mapping} and settings' \
+                  ' {settings}' \
+                  .format(index=index_name, mapping=abs_dir,
+                          settings=(settings_path if index_settings else None)))
+
+            es_client.close(index=index_name)
+            if index_settings:
+                es_client.put_settings(index=index_name, body=index_settings)
+            es_client.put_mapping(index=index_name, doc_type=doc_type, body=index_mapping)
+            es_client.open(index=index_name)
         else:
-            currentfield["type"] = "string"
-
-        fields[key] = currentfield
-    return fields
-
-
-def dumpsFields(fields):
-    """dump fields"""
-    dump = ""
-    for key, value in fields.iteritems():
-        dump = dump + '{% block ' + key + '%}\n'
-        dump = dump + '"' + key  + '"' + ":" + json.dumps(value, indent=4, sort_keys=True) + '\n'
-        dump = dump + '{% endblock%},\n'
-    dump = dump[:-2]
-    dump = dump + '\n{% block custom %}\n'
-    dump = dump + '{% endblock %}\n'
-
-    return dump
-
-
-def create_es_mapping():
-    """main function, link jinja template and create the mapping"""
-    #settings
-    jsonInputSchemaFolder = cfg['ES_SCHEMA_FOLDER']
-    elasticMappingFile = cfg['ES_MAPPING_FILE']
-
-    generatedFieldFile = "/home/letreguilly/virtualenvs/invenio/src/invenio-search/invenio_search/generated/field.json"
-    AnalyserFile = "/home/letreguilly/virtualenvs/invenio/src/invenio-search/invenio_search/base/analyser.json"
-
-    env = Environment(loader=PackageLoader('invenio_search', '.'))
-
-    
-
-    #generate fields
-    rawFields = loadFieldsFromJson(jsonInputSchemaFolder)
-    formatedfields = format_fields(rawFields)
-    dumpsFields(formatedfields)
-    
-    jsonFields = dumpsFields(formatedfields)
-    with open(generatedFieldFile, 'w') as f:
-        f.write(jsonFields) 
-    
-    #render    
-    resultJson = env.get_template('base/baseSchema.json').render(
-    _all = cfg['ES_TEST'],
-    date_detection = cfg['ES_DATE_DETECTION'],
-    numeric_detection = cfg['ES_NUMERIC_DETECTION'],
-    default_type = cfg['ES_DEFAULT_TYPE'],
-    default_analyser = cfg['ES_DEFAULT_ANALYSER']
-    )  
-
-    #writing
-    with open(elasticMappingFile, 'w') as f:
-        f.write(resultJson)
+            print('CREATING index {index} with mapping {mapping} and settings' \
+                  ' {settings}' \
+                  .format(index=index_name, mapping=abs_dir,
+                          settings=(settings_path if index_settings else None)))
+            es_client.create(index=index_name, body={
+                'settings': index_settings,
+                'mappings': {
+                    doc_type: index_mapping,
+                }
+            })

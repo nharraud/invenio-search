@@ -1,0 +1,10 @@
+{
+    "analysis" : {
+        "analyzer":{
+            "content-nongen":{
+                "type":"custom",
+                "tokenizer":"whitespace"
+            }
+        }
+    }
+}

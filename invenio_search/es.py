@@ -43,6 +43,17 @@ def delete_index(sender, **kwargs):
     """Create the elasticsearch index for records."""
     es.indices.delete(index='records', ignore=404)
 
+def get_es_client(app):
+    """Initialize the Elasticsearch client if it is not already created
+    and return it."""
+    global es
+
+    if not es:
+        es = Elasticsearch(
+            app.config.get('ES_HOSTS', None),
+            connection_class=RequestsHttpConnection
+        )
+    return es
 
 def setup_app(app):
     """Set up the extension for the given app."""
@@ -53,12 +64,7 @@ def setup_app(app):
 
     from sqlalchemy.event import listens_for
 
-    global es
-
-    es = Elasticsearch(
-        app.config.get('ES_HOSTS', None),
-        connection_class=RequestsHttpConnection
-    )
+    es = get_es_client(app)
 
     signals.pre_command.connect(delete_index, sender=drop)
     signals.pre_command.connect(create_index, sender=create)
